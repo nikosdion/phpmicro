@@ -18,6 +18,9 @@ env:
   PHP_VERSION: "8.4"
   # Boson's STANDARD_SFX_EXTENSIONS (vendor/boson-php/compiler, MacOSBuiltinTarget)
   EXTENSIONS: "ctype,curl,dom,ffi,filter,iconv,libxml,mbstring,opcache,openssl,pdo,pdo_sqlite,phar,shmop,sockets,sodium,sqlite3,xml,zlib"
+  # static-php-cli downloads prebuilt tools/sources from GitHub; without a token
+  # the anonymous API rate limit on shared runners makes those downloads fail.
+  GITHUB_TOKEN: ${{ github.token }}
 
 jobs:
   build:
