@@ -181,25 +181,51 @@ int micro_fileinfo_init(void) {
     filesize = stats.st_size;
     dbgprintf("%zd, %zd\n", sfxsize, filesize);
     if (filesize <= sfxsize) {
-        // no appended payload: fall back to a sibling payload file "<self>.phar"
-        // (keeps the executable a clean, code-signable binary)
+        // no appended payload: fall back to a sibling payload file (keeps the
+        // executable a clean, code-signable binary). Candidates, in order:
+        //   1. "<self>.phar" next to the executable
+        //   2. "<dir(self)>/../Resources/<basename(self)>.phar" — the macOS
+        //      .app bundle layout, where Contents/MacOS may only hold signed
+        //      Mach-O code and data files live in Contents/Resources
         size_t self_path_len = strlen(self_path);
-        char *sibling_path = malloc(self_path_len + sizeof(".phar"));
-        if (NULL != sibling_path) {
+        const char *self_sep = strrchr(self_path, '/');
+        char *candidates[2] = {NULL, NULL};
+
+        candidates[0] = malloc(self_path_len + sizeof(".phar"));
+        if (NULL != candidates[0]) {
+            memcpy(candidates[0], self_path, self_path_len);
+            memcpy(candidates[0] + self_path_len, ".phar", sizeof(".phar"));
+        }
+        if (NULL != self_sep) {
+            size_t resources_len = self_path_len + sizeof("/../Resources/") + sizeof(".phar");
+            candidates[1] = malloc(resources_len);
+            if (NULL != candidates[1]) {
+                snprintf(candidates[1],
+                    resources_len,
+                    "%.*s/../Resources/%s.phar",
+                    (int)(self_sep - self_path),
+                    self_path,
+                    self_sep + 1);
+            }
+        }
+
+        for (int i = 0; i < 2; i++) {
             struct stat sibling_stats;
-            memcpy(sibling_path, self_path, self_path_len);
-            memcpy(sibling_path + self_path_len, ".phar", sizeof(".phar"));
-            if (0 == stat(sibling_path, &sibling_stats) && S_ISREG(sibling_stats.st_mode)) {
-                dbgprintf("no appended payload, using sibling payload %s\n", sibling_path);
+            if (NULL == candidates[i]) {
+                continue;
+            }
+            if (NULL == _micro_payload_path && 0 == stat(candidates[i], &sibling_stats) &&
+                S_ISREG(sibling_stats.st_mode)) {
+                dbgprintf("no appended payload, using sibling payload %s\n", candidates[i]);
                 close(fd);
-                fd = open(sibling_path, O_RDONLY);
+                fd = open(candidates[i], O_RDONLY);
                 if (-1 == fd) {
-                    fprintf(stderr, "cannot open sibling payload %s.\n", sibling_path);
-                    free(sibling_path);
+                    fprintf(stderr, "cannot open sibling payload %s.\n", candidates[i]);
+                    free(candidates[i]);
                     ret = errno;
                     goto end;
                 }
-                _micro_payload_path = sibling_path;
+                _micro_payload_path = candidates[i];
                 // the sibling file is pure payload (optionally prefixed by an
                 // extra-ini block, parsed below as usual): no sfx to skip, and
                 // any sfxsize limit is meaningless for the external file
@@ -208,7 +234,7 @@ int micro_fileinfo_init(void) {
                 _sfxsize_limit = 0;
                 filesize = sibling_stats.st_size;
             } else {
-                free(sibling_path);
+                free(candidates[i]);
             }
         }
         if (NULL == _micro_payload_path) {
