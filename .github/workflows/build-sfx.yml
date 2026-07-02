@@ -1,0 +1,114 @@
+# Build the sibling-payload micro.sfx runtimes for Grafida.
+#
+# phpmicro is a PHP SAPI: it cannot be built standalone. This workflow checks
+# out stock static-php-cli as the build tool and points it back at THIS
+# repository (-L custom-local source), producing a statically linked micro.sfx
+# per platform with the extension set Boson's "standard" macOS edition ships.
+#
+# Every push to sibling-phar refreshes the rolling "sfx-latest" release, whose
+# assets Grafida's scripts/fetch-sfx.sh downloads into build/sfx/.
+name: Build micro.sfx
+
+on:
+  push:
+    branches: [sibling-phar]
+  workflow_dispatch:
+
+env:
+  PHP_VERSION: "8.4"
+  # Boson's STANDARD_SFX_EXTENSIONS (vendor/boson-php/compiler, MacOSBuiltinTarget)
+  EXTENSIONS: "ctype,curl,dom,ffi,filter,iconv,libxml,mbstring,opcache,openssl,pdo,pdo_sqlite,phar,shmop,sockets,sodium,sqlite3,xml,zlib"
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14
+            asset: macos-aarch64.standard.sfx
+          - runner: macos-15-intel
+            asset: macos-x86_64.standard.sfx
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.4"
+          extensions: curl, openssl, mbstring, tokenizer, phar
+
+      - name: Check out static-php-cli (build tool)
+        run: git clone --depth=1 https://github.com/crazywhalecc/static-php-cli.git spc-tool
+
+      - name: Prepare static-php-cli
+        working-directory: spc-tool
+        run: |
+          composer install --no-interaction --no-progress
+          bin/spc doctor --auto-fix
+
+      - name: Download sources (php-micro = this repository)
+        working-directory: spc-tool
+        run: |
+          bin/spc download --with-php=${{ env.PHP_VERSION }} \
+            --for-extensions="${{ env.EXTENSIONS }}" \
+            -L "php-micro:${{ github.workspace }}"
+          # Guard against static-php-cli renaming the source: the sibling patch
+          # MUST be present in what we are about to build.
+          grep -q "sibling payload" downloads/php-micro/php_micro_fileinfo.c
+
+      - name: Build micro.sfx
+        working-directory: spc-tool
+        run: bin/spc build "${{ env.EXTENSIONS }}" --build-micro
+
+      - name: Smoke-test the sibling payload modes
+        working-directory: spc-tool
+        run: |
+          SFX=buildroot/bin/micro.sfx
+          printf '<?php echo "ok\n";' > t.php
+          # appended (regression)
+          cat "$SFX" t.php > comb && chmod +x comb
+          test "$(./comb)" = ok
+          # sibling "<self>.phar"
+          cp "$SFX" t && chmod +x t && cp t.php t.phar
+          test "$(./t)" = ok
+          # sibling "../Resources/<self>.phar" (macOS bundle layout)
+          mkdir -p B/Contents/MacOS B/Contents/Resources
+          cp "$SFX" B/Contents/MacOS/t && chmod +x B/Contents/MacOS/t
+          cp t.php B/Contents/Resources/t.phar
+          test "$(B/Contents/MacOS/t)" = ok
+
+      - name: Rename artifact
+        run: |
+          mkdir -p out
+          cp spc-tool/buildroot/bin/micro.sfx "out/${{ matrix.asset }}"
+          shasum -a 256 "out/${{ matrix.asset }}" > "out/${{ matrix.asset }}.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: out/*
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request'
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: assets
+          merge-multiple: true
+
+      - name: Publish rolling sfx-latest release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          NOTES="Rolling build of the sibling-payload micro.sfx runtimes (PHP ${PHP_VERSION}, branch ${GITHUB_REF_NAME}, commit ${GITHUB_SHA})."
+          gh release view sfx-latest >/dev/null 2>&1 \
+            || gh release create sfx-latest --title "micro.sfx (rolling)" --notes "$NOTES" --latest=false
+          gh release edit sfx-latest --notes "$NOTES"
+          gh release upload sfx-latest assets/* --clobber
