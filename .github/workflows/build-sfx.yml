@@ -56,9 +56,9 @@ jobs:
           bin/spc download --with-php=${{ env.PHP_VERSION }} \
             --for-extensions="${{ env.EXTENSIONS }}" \
             -L "php-micro:${{ github.workspace }}"
-          # Guard against static-php-cli renaming the source: the sibling patch
-          # MUST be present in what we are about to build.
-          grep -q "sibling payload" downloads/php-micro/php_micro_fileinfo.c
+          # (-L records the local path; nothing lands in downloads/php-micro.
+          # The smoke-test step below is the real guard that the sibling patch
+          # made it into the binary — its sibling modes fail on stock phpmicro.)
 
       - name: Build micro.sfx
         working-directory: spc-tool
