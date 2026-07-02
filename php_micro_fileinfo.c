@@ -74,6 +74,14 @@ const char *micro_get_filename(void);
 
 static size_t _final_sfxsize = 0;
 static size_t _sfxsize_limit = 0;
+/*
+ * when not NULL, the payload lives in this external file (sibling payload
+ * mode) instead of being appended to the executable; micro_get_filename()
+ * returns this path so every downstream consumer (script execution, the
+ * with-offset stream hooks, phar mapping) transparently reads the sibling
+ * file from offset 0
+ */
+static const char *_micro_payload_path = NULL;
 int _micro_init_sfxsize(void);
 
 size_t micro_get_sfxsize(void) {
@@ -173,9 +181,45 @@ int micro_fileinfo_init(void) {
     filesize = stats.st_size;
     dbgprintf("%zd, %zd\n", sfxsize, filesize);
     if (filesize <= sfxsize) {
-        fprintf(stderr, "no payload found.\n" PHP_MICRO_HINT, self_path);
-        ret = FAILURE;
-        goto end;
+        // no appended payload: fall back to a sibling payload file "<self>.phar"
+        // (keeps the executable a clean, code-signable binary)
+        size_t self_path_len = strlen(self_path);
+        char *sibling_path = malloc(self_path_len + sizeof(".phar"));
+        if (NULL != sibling_path) {
+            struct stat sibling_stats;
+            memcpy(sibling_path, self_path, self_path_len);
+            memcpy(sibling_path + self_path_len, ".phar", sizeof(".phar"));
+            if (0 == stat(sibling_path, &sibling_stats) && S_ISREG(sibling_stats.st_mode)) {
+                dbgprintf("no appended payload, using sibling payload %s\n", sibling_path);
+                close(fd);
+                fd = open(sibling_path, O_RDONLY);
+                if (-1 == fd) {
+                    fprintf(stderr, "cannot open sibling payload %s.\n", sibling_path);
+                    free(sibling_path);
+                    ret = errno;
+                    goto end;
+                }
+                _micro_payload_path = sibling_path;
+                // the sibling file is pure payload (optionally prefixed by an
+                // extra-ini block, parsed below as usual): no sfx to skip, and
+                // any sfxsize limit is meaningless for the external file
+                sfxsize = 0;
+                _final_sfxsize = 0;
+                _sfxsize_limit = 0;
+                filesize = sibling_stats.st_size;
+            } else {
+                free(sibling_path);
+            }
+        }
+        if (NULL == _micro_payload_path) {
+            fprintf(stderr,
+                "no payload found.\n" PHP_MICRO_HINT
+                "or place the payload in a file named \"%s.phar\" next to this executable.\n",
+                self_path,
+                self_path);
+            ret = FAILURE;
+            goto end;
+        }
     }
 #    define seekfile(x) \
         do { \
@@ -748,7 +792,7 @@ const char *micro_get_filename(void) {
 
 #elif defined(__linux)
 // use getauxval AT_EXECFN
-const char *micro_get_filename(void) {
+static const char *_micro_get_self_path(void) {
     static char *self_filename = NULL;
     if (NULL == self_filename) {
         self_filename = malloc(PATH_MAX);
@@ -758,7 +802,7 @@ const char *micro_get_filename(void) {
 }
 #elif defined(__FreeBSD__)
 // use elf_aux_info AT_EXECPATH
-const char *micro_get_filename(void) {
+static const char *_micro_get_self_path(void) {
     static char *self_filename = NULL;
     char filename[PATH_MAX];
     if (NULL == self_filename) {
@@ -772,7 +816,7 @@ const char *micro_get_filename(void) {
 }
 #elif defined(__NetBSD__) || defined(__OpenBSD__) || defined(__DragonFly__)
 // use sysctl
-const char *micro_get_filename(void) {
+static const char *_micro_get_self_path(void) {
     static char *self_filename = NULL;
     int mib[4];
     size_t len;
@@ -831,7 +875,7 @@ const char *micro_get_filename(void) {
     return self_filename;
 }
 #elif defined(__APPLE__)
-const char *micro_get_filename(void) {
+static const char *_micro_get_self_path(void) {
     static char *self_path = NULL;
     if (NULL == self_path) {
         uint32_t len = 0;
@@ -866,6 +910,20 @@ error:
 }
 #else
 #    error "not support this system yet"
+#endif
+
+#ifndef PHP_WIN32
+/*
+ * micro_get_filename - the payload file path: the sibling payload file when
+ * in sibling payload mode (see micro_fileinfo_init), otherwise the
+ * self-executable path
+ */
+const char *micro_get_filename(void) {
+    if (NULL != _micro_payload_path) {
+        return _micro_payload_path;
+    }
+    return _micro_get_self_path();
+}
 #endif
 
 size_t micro_get_filename_len(void) {

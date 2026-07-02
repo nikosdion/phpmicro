@@ -35,7 +35,9 @@ size_t micro_get_sfxsize_limit(void);
 const wchar_t *micro_get_filename_w(void);
 #endif
 /*
- *   micro_get_filename - get self filename abs path (char *)
+ *   micro_get_filename - get payload file abs path (char *):
+ *   the self filename, or the sibling payload file ("<self>.phar")
+ *   when the executable carries no appended payload
  */
 const char *micro_get_filename(void);
 /*
