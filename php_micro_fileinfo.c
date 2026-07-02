@@ -216,6 +216,14 @@ int micro_fileinfo_init(void) {
             }
             if (NULL == _micro_payload_path && 0 == stat(candidates[i], &sibling_stats) &&
                 S_ISREG(sibling_stats.st_mode)) {
+                // canonicalise the path: the with-offset stream hooks match the
+                // payload by exact path string, and PHP normalises paths, so a
+                // ".." component would break the match (and thus the offsets)
+                char *resolved = realpath(candidates[i], NULL);
+                if (NULL != resolved) {
+                    free(candidates[i]);
+                    candidates[i] = resolved;
+                }
                 dbgprintf("no appended payload, using sibling payload %s\n", candidates[i]);
                 close(fd);
                 fd = open(candidates[i], O_RDONLY);
