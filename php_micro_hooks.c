@@ -338,6 +338,11 @@ static php_stream *micro_plain_files_opener(php_stream_wrapper *wrapper, const c
         return ps;
     }
     const char *filename_slashed = micro_slashize(filename);
+    if (NULL != getenv("MICRO_TRACE_OPEN")) {
+        fprintf(stderr, "[micro] open '%s' (self '%s') match=%d\n",
+            filename_slashed, self_filename_slashed,
+            0 == strcmp(filename_slashed, self_filename_slashed));
+    }
     if (0 == strcmp(filename_slashed, self_filename_slashed)) {
         dbgprintf("opening self via php_stream, hook it\n");
         if (SUCCESS == micro_modify_ops_with_offset(ps, 1)) {
