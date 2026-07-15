@@ -92,8 +92,78 @@ jobs:
           name: ${{ matrix.asset }}
           path: out/*
 
+  # Windows is a separate job: static-php-cli uses a different toolchain there
+  # (php-sdk-binary-tools + MSVC, not autotools), PE executables must be named
+  # *.exe to run, and there is no chmod — so the download/build steps mirror the
+  # unix job but the smoke test and packaging are PowerShell.
+  build-windows:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.4"
+          extensions: curl, openssl, mbstring, tokenizer, phar
+
+      - name: Check out static-php-cli (build tool)
+        run: git clone --depth=1 https://github.com/crazywhalecc/static-php-cli.git spc-tool
+
+      - name: Prepare static-php-cli
+        working-directory: spc-tool
+        run: |
+          composer install --no-interaction --no-progress
+          bin/spc doctor --auto-fix
+
+      - name: Download sources (php-micro = this repository)
+        working-directory: spc-tool
+        run: >
+          bin/spc download --with-php=${{ env.PHP_VERSION }}
+          --for-extensions="${{ env.EXTENSIONS }}"
+          -L "php-micro:${{ github.workspace }}"
+
+      - name: Build micro.sfx
+        working-directory: spc-tool
+        run: bin/spc build "${{ env.EXTENSIONS }}" --build-micro
+
+      - name: Smoke-test the sibling payload modes
+        working-directory: spc-tool
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $sfx = 'buildroot/bin/micro.sfx'
+          if (-not (Test-Path $sfx)) { throw "micro.sfx not built at $sfx" }
+          Set-Content -NoNewline -Path t.php -Value '<?php echo "ok";'
+
+          # appended payload (regression): micro.sfx PE + script, run as .exe
+          cmd /c "copy /b `"$sfx`" + t.php comb.exe >NUL"
+          $out = & .\comb.exe
+          if ($out -ne 'ok') { throw "appended mode failed: got '$out'" }
+
+          # sibling "<self>.phar" (grafida ships the split payload as t.exe + t.phar)
+          Copy-Item $sfx t.exe
+          Copy-Item t.php t.phar
+          $out = & .\t.exe
+          if ($out -ne 'ok') { throw "sibling mode failed: got '$out'" }
+          Write-Host 'sibling payload smoke test passed'
+
+      - name: Rename artifact
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path out | Out-Null
+          $asset = 'windows-x86_64.standard.sfx'
+          Copy-Item spc-tool/buildroot/bin/micro.sfx "out/$asset"
+          # Emit "<hash>  <name>" so scripts/fetch-sfx.sh (awk '{print $1}') reads it
+          $hash = (Get-FileHash "out/$asset" -Algorithm SHA256).Hash.ToLower()
+          Set-Content -NoNewline -Path "out/$asset.sha256" -Value "$hash  $asset"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-x86_64.standard.sfx
+          path: out/*
+
   publish:
-    needs: build
+    needs: [build, build-windows]
     runs-on: ubuntu-latest
     if: github.event_name != 'pull_request'
     permissions:

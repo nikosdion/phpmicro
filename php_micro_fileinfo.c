@@ -144,9 +144,107 @@ int micro_fileinfo_init(void) {
     }
     filesize = _filesize.QuadPart;
     if (filesize <= sfxsize) {
-        fwprintf(stderr, L"no payload found.\n" PHP_MICRO_HINT, self_path);
-        ret = FAILURE;
-        goto end;
+        // no appended payload: fall back to a sibling payload file (keeps the
+        // executable a clean, code-signable binary — Authenticode appends its
+        // certificate table at EOF, which would corrupt an appended PHAR's
+        // trailing signature). Candidates, in order:
+        //   1. "<self without a trailing .exe>.phar"  (grafida.exe -> grafida.phar)
+        //   2. "<self>.phar"                          (grafida.exe -> grafida.exe.phar)
+        // Mirrors the POSIX branch below; the macOS "../Resources/" candidate is
+        // bundle-specific and has no meaning on Windows, so it is omitted here.
+        size_t self_w_len = wcslen(self_path);
+        wchar_t *candidates[2] = {NULL, NULL};
+
+        // candidate 1: replace a trailing ".exe" (case-insensitive) with ".phar"
+        {
+            size_t base_len = self_w_len;
+            if (self_w_len >= 4 && 0 == _wcsicmp(self_path + self_w_len - 4, L".exe")) {
+                base_len = self_w_len - 4;
+            }
+            // base_len chars + L".phar" (5) + NUL
+            candidates[0] = malloc((base_len + 6) * sizeof(wchar_t));
+            if (NULL != candidates[0]) {
+                memcpy(candidates[0], self_path, base_len * sizeof(wchar_t));
+                memcpy(candidates[0] + base_len, L".phar", 6 * sizeof(wchar_t));
+            }
+        }
+        // candidate 2: append ".phar" to the full self path
+        candidates[1] = malloc((self_w_len + 6) * sizeof(wchar_t));
+        if (NULL != candidates[1]) {
+            memcpy(candidates[1], self_path, self_w_len * sizeof(wchar_t));
+            memcpy(candidates[1] + self_w_len, L".phar", 6 * sizeof(wchar_t));
+        }
+
+        for (int i = 0; i < 2; i++) {
+            if (NULL == candidates[i]) {
+                continue;
+            }
+            DWORD attrs = GetFileAttributesW(candidates[i]);
+            if (NULL == _micro_payload_path && INVALID_FILE_ATTRIBUTES != attrs &&
+                0 == (attrs & FILE_ATTRIBUTE_DIRECTORY)) {
+                HANDLE sibling = CreateFileW(candidates[i],
+                    FILE_ATTRIBUTE_READONLY,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                    NULL,
+                    OPEN_EXISTING,
+                    0,
+                    NULL);
+                if (INVALID_HANDLE_VALUE == sibling) {
+                    fwprintf(stderr, L"cannot open sibling payload %s.\n", candidates[i]);
+                    free(candidates[i]);
+                    ret = FAILURE;
+                    goto end;
+                }
+                LARGE_INTEGER sibling_size;
+                if (!GetFileSizeEx(sibling, &sibling_size)) {
+                    CloseHandle(sibling);
+                    free(candidates[i]);
+                    ret = FAILURE;
+                    goto end;
+                }
+                // hand ownership of the file to the code below: the seek/read
+                // macros use `handle`, so point it at the sibling payload.
+                CloseHandle(handle);
+                handle = sibling;
+                // downstream consumers (the plain-file stream hooks, phar mapping)
+                // match the payload by the NARROW path returned from
+                // micro_get_filename(); store the chosen path as UTF-8 so those
+                // string comparisons succeed.
+                int mb_len = WideCharToMultiByte(CP_UTF8, 0, candidates[i], -1, NULL, 0, NULL, NULL);
+                if (mb_len > 0) {
+                    char *mb = malloc(mb_len);
+                    if (NULL != mb &&
+                        0 != WideCharToMultiByte(CP_UTF8, 0, candidates[i], -1, mb, mb_len, NULL, NULL)) {
+                        _micro_payload_path = mb;
+                    } else {
+                        free(mb);
+                    }
+                }
+                dbgprintf("no appended payload, using sibling payload %S\n", candidates[i]);
+                free(candidates[i]);
+                // the sibling file is pure payload (optionally prefixed by an
+                // extra-ini block, parsed below as usual): no sfx to skip, and
+                // any sfxsize limit is meaningless for the external file
+                sfxsize = 0;
+                _final_sfxsize = 0;
+                _sfxsize_limit = 0;
+                filesize = sibling_size.QuadPart;
+            } else {
+                free(candidates[i]);
+            }
+        }
+        if (NULL == _micro_payload_path) {
+            // narrow fprintf (self path via micro_get_filename(), still the
+            // executable here since _micro_payload_path is NULL): keeps the
+            // "next to this executable" marker as ASCII in the binary so the
+            // packaging step can detect a sibling-capable stub, same as macOS.
+            fprintf(stderr,
+                "no payload found.\n"
+                "or place the payload in a file named \"%s.phar\" next to this executable.\n",
+                micro_get_filename());
+            ret = FAILURE;
+            goto end;
+        }
     }
 #    define seekfile(x) \
         do { \
@@ -793,6 +891,12 @@ const wchar_t *micro_get_filename_w() {
 }
 
 const char *micro_get_filename(void) {
+    // in sibling payload mode the payload lives in an external file, not the
+    // executable; return that path so every downstream consumer reads it (see
+    // micro_fileinfo_init)
+    if (NULL != _micro_payload_path) {
+        return _micro_payload_path;
+    }
     static char *self_filename = NULL;
     if (NULL != self_filename) {
         return self_filename;
