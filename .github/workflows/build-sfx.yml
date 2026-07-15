@@ -137,33 +137,45 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          # pwsh 7.4 wraps native-command calls under a Stop preference and tries
-          # to apply an output encoding to a child whose stdout is not file-
-          # redirected, which fails with "StandardOutputEncoding is only supported
-          # when standard output is redirected". Disable that wrapping and capture
-          # each run via a real stdout redirect to a file (which is exactly what
-          # the message asks for), then read it back.
-          $PSNativeCommandUseErrorActionPreference = $false
 
-          function Invoke-Payload([string]$exe) {
-              & $exe > run.out
-              if ($LASTEXITCODE -ne 0) { throw "$exe exited $LASTEXITCODE" }
-              return (Get-Content run.out -Raw).Trim()
+          # Run a native console app and capture its stdout. Start-Process with an
+          # explicit -RedirectStandardOutput genuinely redirects the child's stdout
+          # (unlike pwsh's `& native > file`, which under a Stop preference throws
+          # "StandardOutputEncoding is only supported when standard output is
+          # redirected"), so it works reliably for phpmicro's CLI output.
+          function Invoke-Payload([string]$name) {
+              $exe  = Join-Path $PWD $name
+              $outF = Join-Path $PWD 'run.out'
+              $errF = Join-Path $PWD 'run.err'
+              $p = Start-Process -FilePath $exe -WorkingDirectory $PWD -NoNewWindow -Wait -PassThru `
+                     -RedirectStandardOutput $outF -RedirectStandardError $errF
+              if ($p.ExitCode -ne 0) {
+                  Write-Host "stderr: $(Get-Content $errF -Raw)"
+                  throw "$name exited $($p.ExitCode)"
+              }
+              return (Get-Content $outF -Raw).Trim()
           }
 
           $sfx = 'buildroot/bin/micro.sfx'
           if (-not (Test-Path $sfx)) { throw "micro.sfx not built at $sfx" }
           Set-Content -NoNewline -Path t.php -Value '<?php echo "ok";'
 
-          # appended payload (regression): micro.sfx PE + script, run as .exe
-          cmd /c "copy /b `"$sfx`" + t.php comb.exe >NUL"
-          $out = Invoke-Payload '.\comb.exe'
+          # appended payload (regression): micro.sfx PE + script, concatenated into
+          # a PE. Build it via a FileStream — cmd's `copy /b` mis-parses forward-
+          # slash paths, and `byte[] + byte[]` in pwsh boxes into a huge Object[].
+          $fs = [System.IO.File]::Create((Join-Path $PWD 'comb.exe'))
+          foreach ($part in @($sfx, 't.php')) {
+              $bytes = [System.IO.File]::ReadAllBytes($part)
+              $fs.Write($bytes, 0, $bytes.Length)
+          }
+          $fs.Close()
+          $out = Invoke-Payload 'comb.exe'
           if ($out -ne 'ok') { throw "appended mode failed: got '$out'" }
 
           # sibling "<self>.phar" (grafida ships the split payload as t.exe + t.phar)
           Copy-Item $sfx t.exe
           Copy-Item t.php t.phar
-          $out = Invoke-Payload '.\t.exe'
+          $out = Invoke-Payload 't.exe'
           if ($out -ne 'ok') { throw "sibling mode failed: got '$out'" }
           Write-Host 'sibling payload smoke test passed'
 
