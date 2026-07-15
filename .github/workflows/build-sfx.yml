@@ -226,19 +226,31 @@ jobs:
           $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
           $vs = & $vswhere -latest -property installationPath
           if (-not $vs) { throw "Visual Studio not found via vswhere" }
-          $redist = Join-Path $vs 'VC\Redist\MSVC'
-          # newest redist version, then its x64 Microsoft.VC<nn>.CRT folder
-          $ver = Get-ChildItem $redist -Directory | Sort-Object Name -Descending | Select-Object -First 1
-          $crt = Get-ChildItem (Join-Path $ver.FullName 'x64') -Directory -Filter 'Microsoft.VC*.CRT' |
-                   Select-Object -First 1
-          if (-not $crt) { throw "VC CRT redist folder not found under $($ver.FullName)\x64" }
-          Write-Host "VC++ CRT redist: $($crt.FullName)"
           $need = @('VCRUNTIME140.dll','VCRUNTIME140_1.dll','MSVCP140.dll','MSVCP140_ATOMIC_WAIT.dll')
+
+          # Locate an x64 folder that actually holds ALL of the runtime DLLs. The
+          # redist layout is not stable: the version dir may be numeric (14.44.x)
+          # or a `v143` alias that carries no x64 subtree, so a plain "newest name"
+          # pick lands on an empty path. Recurse instead and keep only a folder
+          # containing the complete set; fall back to the compiler's own x64
+          # runtime dir (VC\Tools\MSVC\<ver>\bin\Hostx64\x64) if no redist matches.
+          function Find-Crt([string] $root, [string[]] $files) {
+              if (-not (Test-Path $root)) { return $null }
+              Get-ChildItem $root -Recurse -Directory -ErrorAction SilentlyContinue |
+                  Where-Object { $_.FullName -match '\\x64($|\\)' } |
+                  Where-Object {
+                      $dir = $_.FullName
+                      (@($files | Where-Object { Test-Path (Join-Path $dir $_) }).Count) -eq $files.Count
+                  } |
+                  Sort-Object FullName -Descending | Select-Object -First 1
+          }
+          $crt = Find-Crt (Join-Path $vs 'VC\Redist\MSVC') $need
+          if (-not $crt) { $crt = Find-Crt (Join-Path $vs 'VC\Tools\MSVC') $need }
+          if (-not $crt) { throw "No x64 VC++ runtime folder holding all of: $($need -join ', ')" }
+          Write-Host "VC++ CRT source: $($crt.FullName)"
           New-Item -ItemType Directory -Force -Path vcrt | Out-Null
           foreach ($d in $need) {
-              $src = Join-Path $crt.FullName $d
-              if (-not (Test-Path $src)) { throw "missing $d in $($crt.FullName)" }
-              Copy-Item $src (Join-Path 'vcrt' $d)
+              Copy-Item (Join-Path $crt.FullName $d) (Join-Path 'vcrt' $d)
           }
           $zip = 'out/vc-runtime-x86_64.zip'
           Compress-Archive -Path vcrt/* -DestinationPath $zip -Force
