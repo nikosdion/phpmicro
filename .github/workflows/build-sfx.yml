@@ -111,8 +111,14 @@ jobs:
 
       - name: Prepare static-php-cli
         working-directory: spc-tool
+        # --no-dev: SPC needs none of its dev tools to build micro.sfx, and one of
+        # them (captainhook/captainhook-phar via phar-io/composer-distributor)
+        # GPG-verifies a PHAR download during install, which fails on the Windows
+        # runner ("Could not import required GPG key!"). Skipping dev deps sidesteps
+        # GPG entirely and is deterministic. (The unix job keeps dev deps — its
+        # runners have a working gpg — but --no-dev would be fine there too.)
         run: |
-          composer install --no-interaction --no-progress
+          composer install --no-interaction --no-progress --no-dev
           bin/spc doctor --auto-fix
 
       - name: Download sources (php-micro = this repository)
