@@ -179,6 +179,27 @@ jobs:
           if ($out -ne 'ok') { throw "sibling mode failed: got '$out'" }
           Write-Host 'sibling payload smoke test passed'
 
+          # SIGNED sibling stub — the layout grafida actually ships. Authenticode
+          # appends a certificate table at EOF, PAST the last PE section, so the
+          # signed stub's file size exceeds its section end. sfxsize must fold in
+          # the certificate table (IMAGE_DIRECTORY_ENTRY_SECURITY); otherwise the
+          # stub looks like it carries an appended payload and the sibling fallback
+          # never fires — it would try to load the certificate as the phar. Verify
+          # with a throwaway self-signed cert (trust is irrelevant; we only need the
+          # certificate table appended so the runtime hits that code path).
+          Copy-Item $sfx signed.exe
+          Copy-Item t.php signed.phar
+          $cert = New-SelfSignedCertificate -Type CodeSigningCert `
+                    -Subject 'CN=Grafida SFX Smoke Test' -CertStoreLocation Cert:\CurrentUser\My
+          $null = Set-AuthenticodeSignature -FilePath signed.exe -Certificate $cert
+          Remove-Item "Cert:\CurrentUser\My\$($cert.Thumbprint)" -Force
+          if ((Get-Item signed.exe).Length -le (Get-Item $sfx).Length) {
+              throw "signing did not append a certificate table (test would be a no-op)"
+          }
+          $out = Invoke-Payload 'signed.exe'
+          if ($out -ne 'ok') { throw "signed sibling mode failed: got '$out'" }
+          Write-Host 'signed sibling payload smoke test passed'
+
       - name: Rename artifact
         shell: pwsh
         run: |

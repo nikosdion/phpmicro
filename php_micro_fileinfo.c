@@ -571,6 +571,20 @@ int _micro_init_sfxsize(void) {
         update_sfxsize(sectionHeaders[i].PointerToRawData + sectionHeaders[i].SizeOfRawData);
     }
 
+    // The Authenticode certificate table lives in the IMAGE_DIRECTORY_ENTRY_SECURITY
+    // data directory — a raw FILE offset + size (unlike the RVA-based directories) —
+    // and is appended at EOF, outside every section. A code-signed executable is
+    // therefore larger than its last section end. Fold it into sfxsize so the value
+    // reflects the true end of the executable image; otherwise a split + signed
+    // sibling stub (section end < EOF, the gap being the signature) looks like it
+    // carries an appended payload and the sibling-payload fallback in
+    // micro_fileinfo_init never fires — it would try to load the certificate as the
+    // phar. macOS gets this for free: __LINKEDIT already covers the signature.
+    IMAGE_DATA_DIRECTORY certDir = ntHeader.OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_SECURITY];
+    if (0 != certDir.VirtualAddress && 0 != certDir.Size) {
+        update_sfxsize((size_t)certDir.VirtualAddress + certDir.Size);
+    }
+
 error:
     if (INVALID_HANDLE_VALUE != hFile) {
         CloseHandle(hFile);
