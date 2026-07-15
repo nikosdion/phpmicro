@@ -137,19 +137,33 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
+          # pwsh 7.4 wraps native-command calls under a Stop preference and tries
+          # to apply an output encoding to a child whose stdout is not file-
+          # redirected, which fails with "StandardOutputEncoding is only supported
+          # when standard output is redirected". Disable that wrapping and capture
+          # each run via a real stdout redirect to a file (which is exactly what
+          # the message asks for), then read it back.
+          $PSNativeCommandUseErrorActionPreference = $false
+
+          function Invoke-Payload([string]$exe) {
+              & $exe > run.out
+              if ($LASTEXITCODE -ne 0) { throw "$exe exited $LASTEXITCODE" }
+              return (Get-Content run.out -Raw).Trim()
+          }
+
           $sfx = 'buildroot/bin/micro.sfx'
           if (-not (Test-Path $sfx)) { throw "micro.sfx not built at $sfx" }
           Set-Content -NoNewline -Path t.php -Value '<?php echo "ok";'
 
           # appended payload (regression): micro.sfx PE + script, run as .exe
           cmd /c "copy /b `"$sfx`" + t.php comb.exe >NUL"
-          $out = & .\comb.exe
+          $out = Invoke-Payload '.\comb.exe'
           if ($out -ne 'ok') { throw "appended mode failed: got '$out'" }
 
           # sibling "<self>.phar" (grafida ships the split payload as t.exe + t.phar)
           Copy-Item $sfx t.exe
           Copy-Item t.php t.phar
-          $out = & .\t.exe
+          $out = Invoke-Payload '.\t.exe'
           if ($out -ne 'ok') { throw "sibling mode failed: got '$out'" }
           Write-Host 'sibling payload smoke test passed'
 
