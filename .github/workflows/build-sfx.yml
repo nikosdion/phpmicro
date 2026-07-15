@@ -210,6 +210,41 @@ jobs:
           $hash = (Get-FileHash "out/$asset" -Algorithm SHA256).Hash.ToLower()
           Set-Content -NoNewline -Path "out/$asset.sha256" -Value "$hash  $asset"
 
+      # Collect the Visual C++ 2015-2022 runtime DLLs (app-local redistributable)
+      # and publish them alongside the SFX. They are NOT a phpmicro dependency (the
+      # SFX is statically linked); they are for the CONSUMER: Boson's prebuilt
+      # libboson-windows-x86_64.dll imports MSVCP140*/VCRUNTIME140*, which a clean
+      # Windows (especially Server) lacks. Grafida ships them next to grafida.exe so
+      # its per-user, no-admin installer is self-contained. This Windows CI is the
+      # only place in the toolchain with a real VS install, hence here. Sourced from
+      # the VS Redist folder — the canonical redistributable copy, app-local
+      # deployment permitted by its license.
+      - name: Collect the Visual C++ runtime (for Grafida's app-local bundle)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs = & $vswhere -latest -property installationPath
+          if (-not $vs) { throw "Visual Studio not found via vswhere" }
+          $redist = Join-Path $vs 'VC\Redist\MSVC'
+          # newest redist version, then its x64 Microsoft.VC<nn>.CRT folder
+          $ver = Get-ChildItem $redist -Directory | Sort-Object Name -Descending | Select-Object -First 1
+          $crt = Get-ChildItem (Join-Path $ver.FullName 'x64') -Directory -Filter 'Microsoft.VC*.CRT' |
+                   Select-Object -First 1
+          if (-not $crt) { throw "VC CRT redist folder not found under $($ver.FullName)\x64" }
+          Write-Host "VC++ CRT redist: $($crt.FullName)"
+          $need = @('VCRUNTIME140.dll','VCRUNTIME140_1.dll','MSVCP140.dll','MSVCP140_ATOMIC_WAIT.dll')
+          New-Item -ItemType Directory -Force -Path vcrt | Out-Null
+          foreach ($d in $need) {
+              $src = Join-Path $crt.FullName $d
+              if (-not (Test-Path $src)) { throw "missing $d in $($crt.FullName)" }
+              Copy-Item $src (Join-Path 'vcrt' $d)
+          }
+          $zip = 'out/vc-runtime-x86_64.zip'
+          Compress-Archive -Path vcrt/* -DestinationPath $zip -Force
+          $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
+          Set-Content -NoNewline -Path "$zip.sha256" -Value "$hash  vc-runtime-x86_64.zip"
+
       - uses: actions/upload-artifact@v4
         with:
           name: windows-x86_64.standard.sfx
