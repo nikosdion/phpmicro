@@ -128,9 +128,21 @@ jobs:
           --for-extensions="${{ env.EXTENSIONS }}"
           -L "php-micro:${{ github.workspace }}"
 
+      # --enable-micro-win32 links the SFX as a GUI-subsystem PE
+      # (/SUBSYSTEM:WINDOWS) and defines PHP_MICRO_WIN32_NO_CONSOLE. Without it
+      # micro.sfx is a console app, so Windows hands every consumer built on it
+      # a conhost window it never asked for: launching Grafida or Akeeba Extract
+      # from the Start menu pops a black command window behind the real UI
+      # (akeeba/extract#4). These SFXen only ever back GUI applications, so the
+      # console subsystem buys nothing.
+      #
+      # It does NOT cost us argv: the NO_CONSOLE build enters through WinMain()
+      # and recovers argc/argv from the CRT's __argc/__argv, so $_SERVER['argv']
+      # still carries the command line — which is what makes file associations
+      # ("open this .jpa with Akeeba Extract") work.
       - name: Build micro.sfx
         working-directory: spc-tool
-        run: bin/spc build "${{ env.EXTENSIONS }}" --build-micro
+        run: bin/spc build "${{ env.EXTENSIONS }}" --build-micro --enable-micro-win32
 
       - name: Smoke-test the sibling payload modes
         working-directory: spc-tool
@@ -158,6 +170,22 @@ jobs:
 
           $sfx = 'buildroot/bin/micro.sfx'
           if (-not (Test-Path $sfx)) { throw "micro.sfx not built at $sfx" }
+
+          # The SFX must be a GUI-subsystem PE (--enable-micro-win32). A console
+          # -subsystem build works perfectly well but gives every consumer app a
+          # stray conhost window at launch (akeeba/extract#4), which is exactly
+          # the kind of regression nobody notices until it ships. Read the PE
+          # Optional Header's Subsystem field: e_lfanew (uint32 @ 0x3C), then
+          # + 4 (PE signature) + 20 (COFF header) + 68 = the uint16 Subsystem.
+          # 2 = IMAGE_SUBSYSTEM_WINDOWS_GUI, 3 = ..._WINDOWS_CUI.
+          $pe = [System.IO.File]::ReadAllBytes((Join-Path $PWD $sfx))
+          $eLfanew = [BitConverter]::ToUInt32($pe, 0x3C)
+          $subsystem = [BitConverter]::ToUInt16($pe, $eLfanew + 4 + 20 + 68)
+          if ($subsystem -ne 2) {
+              throw "micro.sfx is subsystem $subsystem, expected 2 (WINDOWS_GUI) — was --enable-micro-win32 dropped from the build step?"
+          }
+          Write-Host 'GUI subsystem (console-less) confirmed'
+
           Set-Content -NoNewline -Path t.php -Value '<?php echo "ok";'
 
           # appended payload (regression): micro.sfx PE + script, concatenated into
